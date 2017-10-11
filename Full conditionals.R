@@ -4,7 +4,7 @@
 
 #### w_j
 
-vj <- function(j, b, d, z){
+v_j <- function(j, b, d, z){
   #b es el hiperparámetro
   zi <- unlist(z)
   nj <- length(which(dj == j))
@@ -30,29 +30,40 @@ wj <- function(j, vj, zi, di, b, epsilon){
 
 #### \rho_j
 
-rho_j <- function(x, old_rho, R, pi, d_i, sigma, w_j){
-  tau <- 1/sigma
-  sigma_r <- function(r)  return(solve( cbind(c(1, r), c(r, 1)) ))
-  mu_i <- function(i) return( t( c(x[i+1] - mu[d_i[i]], x[i] - mu[d_i[i]] ) ) )
-  dens <- function(j){
-    function(r){
-      s_r <- sigma_r(r)
-      sumable <- which(d_i == j)
-      mus <- sapply(sumable, mu_i)
-      aux <- function(x) t(x) %*% s_r %*% x
-      suma <- sapply(mus, aux)
-      suma <- sum(suma)
-      return( pi(r)*(1-r^2)^(-length(which(dj == j)) / 2) * exp(-tau/2*suma) )
+rho_j <- function(x, old_rho, R, pi, d_i, mu, sigma, w_j, same_rho){
+  if(same_rho){
+    dens <- function(r){
+      x_prev <- c(0, x[-length(x)])
+      expo <- -sum((x - mu[d_i]*(1-r) - r*x_prev)^2)/(2*sigma*(1-r^2))
+      (1-r^2)^(-length(x)/2)*exp(expo)
     }
+    non_normal <- sapply(R, dens)
+    probs <- non_normal/sum(non_normal)
+    return(sample(R, 1, prob = probs))
+  } else{
+    tau <- 1/sigma
+    sigma_r <- function(r)  return(solve( cbind(c(1, r), c(r, 1)) ))
+    mu_i <- function(i) return( t( c(x[i+1] - mu[d_i[i]], x[i] - mu[d_i[i]] ) ) )
+    dens <- function(j){
+      function(r){
+        s_r <- sigma_r(r)
+        sumable <- which(d_i == j)
+        mus <- sapply(sumable, mu_i)
+        aux <- function(x) t(x) %*% s_r %*% x
+        suma <- sapply(mus, aux)
+        suma <- sum(suma)
+        return( pi(r)*(1-r^2)^(-length(which(dj == j)) / 2) * exp(-tau/2*suma) )
+      }
+    }
+    dens.app <- lapply(1:length(w_j), dens)
+    probs <- matrix(nrow = length(R), ncol = length(w_j))
+    for(i in 1:length(dens.app)){
+      probs[,i] <- sapply(R, dens[[i]])
+    }
+    probs <- apply(probs, 2, function(x) x/sum(x))
+    new_rho <- apply(probs, 2, function(x) sample(R, 1, prob = x))
+    return(new_rho)
   }
-  dens.app <- lapply(1:length(w_j), dens)
-  probs <- matrix(nrow = length(R), ncol = length(w_j))
-  for(i in 1:length(dens.app)){
-    probs[,i] <- sapply(R, dens[[i]])
-  }
-  probs <- apply(probs, 2, function(x) x/sum(x))
-  new_rho <- apply(probs, 2, function(x) sample(R, 1, prob = x))
-  return(new_rho)
 }
 
 #### d_i
@@ -108,11 +119,19 @@ z_li <- function(x, old_z, wj, phi, mu, sigma, ki){
 
 #### mu_j
 
-mu_j <- function(j, x, old_mu, rho, d_i, z_il, t, sigma){
-  t_j <- function(j){ t + 2* length(which(d_i == j)) /(1+rho[j])  }
+mu_j <- function(j, x, old_mu, rho, d_i, z_il, t, sigma, same_rho){
+  if(same_rho){
+    t_j <- function(j){ t + 2* length(which(d_i == j)) /(1+rho)  }    
+  } else{
+    t_j <- function(j){ t + 2* length(which(d_i == j)) /(1+rho[j])  }
+  }  
   m_j <- function(j, t.j){
     indices <- which(d_i == j)
-    suma <- sum(x[indices] + x[indices-1])/(1+rho[j])
+    if(same_rho){
+      suma <- sum(x[indices] + x[indices-1])/(1+rho)      
+    } else{
+      suma <- sum(x[indices] + x[indices-1])/(1+rho[j])
+    }
     return(  1/t.j* (m*t + (1/sigma) * suma ) )
   }
   num.prob <- vector(length(x)-1, 'double')
@@ -149,9 +168,15 @@ tau <- function(x, mu, d_i, old_tau, rho, c, a, z_il){
   sigma_r <- function(r)  return(solve( cbind(c(1, r), c(r, 1)) ))
   mu_i <- function(i) return( t( c(x[i+1] - mu[d_i[i]], x[i] - mu[d_i[i]] ) ) )
   mus <- sapply(1:length(x) - 1, mu_i)
-  s_r <- sapply(rho, sigma_r)
-  aux <- function(x) t(x) %*% s_r %*% x
-  suma <- sapply(mus, aux)
+  if(same_rho){
+    s_r <- sigma_r(rho)
+    aux <- function(i) t(mus[i]) %*% s_r %*% x[i]
+  } else{
+    s_r <- sapply(rho, sigma_r)
+    aux <- function(i) t(mus[i]) %*% s_r[i] %*% x[i]    
+  }
+
+  suma <- sapply(1:length(mus), aux)
   suma <- sum(suma)
   
   c.hat <- c + suma/2
@@ -211,23 +236,55 @@ k_i <- function(old_k, x, wj, p, z_il){
 ##########
 
 
-simulacion <- function(n){
-  dens <- function(x) 0.2*dnorm(x, -5, 1)+0.4*dnorm(x, 0, 3)+0.4*dnorm(x, 7) 
-  dens <- Vectorize(dens, 'x')
-  curve(dens, xlim=c(-15,15))
-  
-  componentes <- sample(1:3,prob=c(0.2, 0.4, 0.4),size=n,replace=TRUE)
-  mus <- c(-5, 0, 7)
-  sds <- sqrt(c(1, 3, 1))
-  
-  samples <- rnorm(n, mean=mus[componentes], sd=sds[componentes])
-  return(samples)
+# simulacion <- function(n){
+#   dens <- function(x) 0.2*dnorm(x, -5, 1)+0.4*dnorm(x, 0, 3)+0.4*dnorm(x, 7) 
+#   dens <- Vectorize(dens, 'x')
+#   curve(dens, xlim=c(-15,15))
+#   
+#   componentes <- sample(1:3,prob=c(0.2, 0.4, 0.4),size=n,replace=TRUE)
+#   mus <- c(-5, 0, 7)
+#   sds <- sqrt(c(1, 3, 1))
+#   
+#   samples <- rnorm(n, mean=mus[componentes], sd=sds[componentes])
+#   return(samples)
+# }
+
+#ademas de tau o sigma
+mcmc <- function(datos, nsim, ksi, phi, epsilon, R, pi, same_rho, c, a, p){
+  w <- vector(nsim, 'list')
+  d <- vector(nsim, 'list')
+  z <- vector(nsim, 'list')
+  rho <- vector(nsim, 'list')
+  mu <- vector(nsim, 'list')
+  tau <- vector(nsim, 'list')
+  k <- vector(nsim, 'list')
+    #list(R, mu, dj, z_il, sigma)
+  for(i in 2:nsim){
+      #?
+    w[[i]] <- wj(j = i, vj = v_j(i, b, d[[i-1]], z[[i-1]]),
+           b, d[[i-1]], z[[i-1]], epsilon)
+    d[[i]] <- d_i(x = datos, old_d = d[[i-1]], 
+            wj = w[[i]], ksi=ksi, mu = mu[[i-1]],
+            sigma = sigma[[i-1]], rho = rho[[i-1]])
+    z[[i]] <- z_li(x = datos, old_z = z[[i-1]], wj = w[[i]], 
+               phi=phi, mu = mu[[i-1]], sigma = sigma[[i]],
+             k_i = k[[i]])
+    #Creo que no se usa pi
+    rho[[i]] <- rho_j(x = datos, old_rho = rho[[i-1]], R, pi,
+                d_i = d[[i]], mu = mu[[i-1]],
+                sigma = sigma[[i-1]], w_j = w[[i]], same_rho)
+    mu[[i]] <- mu_j(j = i, x = datos, old_mu = mu[[i-1]],
+              rho = rho[[i]], d_i = d[[i]],
+              z_il = z[[i]], t, sigma = sigma[[i-1]], same_rho),
+    sigma[[i]] <- tau(x = datos, mu = mu[[i]], d_i = d[[i]],
+              old_tau = sigma[[i-1]], rho = rho[[i]],
+              c, a, z_il = z[[i]])
+    k[[i]] = k_i(old_k = k[[i-1]], x = datos,
+            wj = w[[i]], p, z_il = z[[i]])
+  }
+  return(simul)
 }
 
-post.inf <- function(datos, nsim){
-  simul <- vector(nsim, 'list')
-  init 
-  for(i in 1:nsim){
-    simul[[i]] <- list()
-  }
+post.inf <- function(mcmc){
+  
 }
