@@ -14,23 +14,25 @@ v_j <- function(j, b, d, z){
   return(rbeta(1, 1 + nj + Nj, b + nj_p + Nj_p))
 }
 
-wj <- function(j, vj, zi, di, b, epsilon){
+wj <- function(zi, di, b, epsilon){
   zi <- unlist(zi)
   J1 <- max(zi, di)
-  inv <- cumprod(1-vj)
+  top <- length(unique(di))
+  vjs <- sapply(1:top, vj, b = b, d = di, z = zi)
+  inv <- cumprod(1-vjs)
   men <- inv[which(inv < epsilon)]
   J2 <- which.min(men)
   J <- max(J1, J2)
-  vjs <- sapply(1:J, vj, b = b, d = di, z = zi)
+  vjs <- vjs[1:J]
   wjs <- vector('double', J)
   wjs[1] <- vjs[1]
-  wjs[2:J] <- vjs[2:j]*cumprod(1 - vjs[1:(J-1)])
+  wjs[2:J] <- vjs[2:J]*cumprod(1 - vjs[1:(J-1)])
   return(wjs)
 }
 
 #### \rho_j
 
-rho_j <- function(x, old_rho, R, pi, d_i, mu, sigma, w_j, same_rho){
+rho_j <- function(x, old_rho, R, d_i, mu, sigma, w_j, same_rho){
   if(same_rho){
     dens <- function(r){
       x_prev <- c(0, x[-length(x)])
@@ -52,7 +54,7 @@ rho_j <- function(x, old_rho, R, pi, d_i, mu, sigma, w_j, same_rho){
         aux <- function(x) t(x) %*% s_r %*% x
         suma <- sapply(mus, aux)
         suma <- sum(suma)
-        return( pi(r)*(1-r^2)^(-length(which(dj == j)) / 2) * exp(-tau/2*suma) )
+        return( (1-r^2)^(-length(which(dj == j)) / 2) * exp(-tau/2*suma) )
       }
     }
     dens.app <- lapply(1:length(w_j), dens)
@@ -250,7 +252,7 @@ k_i <- function(old_k, x, wj, p, z_il){
 # }
 
 #ademas de tau o sigma
-mcmc <- function(datos, nsim, ksi, phi, epsilon, R, pi, same_rho, c, a, p){
+mcmc <- function(datos, nsim, ksi, phi, epsilon, R, same_rho, c, a, p){
   w <- vector(nsim, 'list')
   d <- vector(nsim, 'list')
   z <- vector(nsim, 'list')
@@ -260,23 +262,21 @@ mcmc <- function(datos, nsim, ksi, phi, epsilon, R, pi, same_rho, c, a, p){
   k <- vector(nsim, 'list')
     #list(R, mu, dj, z_il, sigma)
   for(i in 2:nsim){
-      #?
-    w[[i]] <- wj(j = i, vj = v_j(i, b, d[[i-1]], z[[i-1]]),
-           b, d[[i-1]], z[[i-1]], epsilon)
+  #checar si el razonamiento es correcto
+    w[[i]] <- wj(z[[i-1]], d[[i-1]], b, epsilon)
     d[[i]] <- d_i(x = datos, old_d = d[[i-1]], 
             wj = w[[i]], ksi=ksi, mu = mu[[i-1]],
             sigma = sigma[[i-1]], rho = rho[[i-1]])
     z[[i]] <- z_li(x = datos, old_z = z[[i-1]], wj = w[[i]], 
                phi=phi, mu = mu[[i-1]], sigma = sigma[[i]],
              k_i = k[[i]])
-    #Creo que no se usa pi
-    rho[[i]] <- rho_j(x = datos, old_rho = rho[[i-1]], R, pi,
+    rho[[i]] <- rho_j(x = datos, old_rho = rho[[i-1]], R,
                 d_i = d[[i]], mu = mu[[i-1]],
                 sigma = sigma[[i-1]], w_j = w[[i]], same_rho)
     mu[[i]] <- mu_j(j = i, x = datos, old_mu = mu[[i-1]],
               rho = rho[[i]], d_i = d[[i]],
               z_il = z[[i]], t, sigma = sigma[[i-1]], same_rho),
-    sigma[[i]] <- tau(x = datos, mu = mu[[i]], d_i = d[[i]],
+    sigma[[i]] <- 1/tau(x = datos, mu = mu[[i]], d_i = d[[i]],
               old_tau = sigma[[i-1]], rho = rho[[i]],
               c, a, z_il = z[[i]])
     k[[i]] = k_i(old_k = k[[i-1]], x = datos,
