@@ -241,7 +241,7 @@ k_i <- function(old_k, x, wj, p, z_il, mu, sigma){
     if(no.acepto[i]){
       r <- runif(1)
       if(r < prob.des)
-        new.k[i] <- old.k[i] - 1
+        new.k[i] <- old_k[i] - 1
       else
         new.k[i] <- old_k[i]
     }
