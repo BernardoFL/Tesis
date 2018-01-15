@@ -20,9 +20,9 @@ wj <- function(zi, di, b, epsilon){
   vjs <- sapply(1:(J1*40), v_j, b = b, d = di, z = zi)
   inv <- cumprod(1-vjs)
   men <- which(inv < epsilon)
-  eval(parse(text = paste('J2 <-', which.min(men))),envir=parent.frame())
- # J <- max(J1, J2)
-  #vjs <- vjs[1:J]
+  J2 <- which.min(men)
+  J <- max(J1, J2)
+  vjs <- vjs[1:J]
   wjs <- vector('double', length(vjs))
   wjs[1] <- vjs[1]
   wjs[-1] <- vjs[-1]*cumprod(1 - vjs[-length(vjs)])
@@ -31,7 +31,7 @@ wj <- function(zi, di, b, epsilon){
   return(wjs)
 }
 
-#### \rho_j
+#### \rho_j poner mpfr
 
 rho_j <- function(x, old_rho, R, d_i, mu, sigma, w_j, same_rho){
   if(same_rho){
@@ -52,23 +52,28 @@ rho_j <- function(x, old_rho, R, d_i, mu, sigma, w_j, same_rho){
     tau <- 1/sigma
     sigma_r <- function(r)  return(solve( cbind(c(1, r), c(r, 1)) ))
     mu_i <- function(i) return( t( c(x[i+1] - mu[d_i[i]], x[i] - mu[d_i[i]] ) ) )
-    dens <- function(j){
-      function(r){
+    dens <- function(j, r){
         s_r <- sigma_r(r)
         sumable <- which(d_i == j)
         mus <- sapply(sumable, mu_i)
         aux <- function(x) t(x) %*% s_r %*% x
-        suma <- sapply(mus, aux)
+        suma <- apply(mus, 2, aux)
         suma <- sum(suma)
-        return( (1-r^2)^(-length(which(dj == j)) / 2) * exp(-tau/2*suma) )
-      }
+        if(exp(-tau/2*suma) == 0){
+          suma <- mpfr(suma, 100)
+        }
+        return( (1-r^2)^(-length(which(d_i == j)) / 2) * exp(-tau/2*suma) )
     }
-    dens.app <- lapply(1:length(w_j), dens)
-    probs <- matrix(nrow = length(R), ncol = length(w_j))
-    for(i in 1:length(dens.app)){
-      probs[,i] <- sapply(R, dens[[i]])
+    #dens.app <- lapply(1:length(w_j), dens)
+    probs <- vector('list', length(w_j))
+    for(i in 1:length(w_j)){
+      probs[[i]] <- lapply(R, dens, j = i)
     }
-    probs <- apply(probs, 2, function(x) x/sum(x))
+    browser()
+    probs <- lapply(probs, function(.) lapply(., function(x) x/Reduce('+',.)))
+    suppressWarnings(probs <- lapply(probs, function(.) sapply(., function(x) ifelse(is(x,'mpfr'), asNumeric(x), x))))
+    probs <- do.call(cbind, probs)  
+ 
     new_rho <- apply(probs, 2, function(x) sample(R, 1, prob = x))
     return(new_rho)
   }
@@ -77,64 +82,49 @@ rho_j <- function(x, old_rho, R, d_i, mu, sigma, w_j, same_rho){
 #### d_i
 
 
-d_i <- function(x, old_d, wj, ksi, mu, sigma, rho, same_rho, i){
-  sigma <- sqrt(sigma)
-  vj <- sapply(old_d, function(x) runif(1, min = 0, max = exp(-ksi*x)) )
-  Js <- sapply(vj, function(x) floor( -(1/ksi)*log(x) ) )
-  sop <- lapply(Js, function(x) return(1:x))
-  dens <- function(x, y, mu, mu.y, rho){ function(j){exp(ksi*j)*wj[j]*dnorm(mpfr(x,100), mu, mpfr(sigma,100))*dnorm(mpfr(y,100), mu.y+rho*(x-mu.y), mpfr(sigma,100)) }}
-  app.dens <- vector('list', length(x)-1)
-  for(i in 2:(length(x) - 1)){#checar este ciclo
-    if(same_rho) #n+1
-      app.dens[[i]] <- dens(x[i+1], x[i], mu[old_d[i]], mu[old_d[i-1]], rho) 
-    else
-      app.dens[[i]] <- dens(x[i+1], x[i], mu[old_d[i]], mu[old_d[i-1]], rho[i])       
-    #dens(x[i], x[i-1], mu, mu.y, rho) #Necesito checar los parámetros
+d_i <- function(x, old_d, wj, ksi, mu, sigma, rho, same_rho, i, error){
+  sigma <- sqrt(sigma); n <- length(x) - 1
+  dens <- function(i, j){ 
+    log(wj[j]) - (x[i+1] - mu[j])^2/(2*sigma^2) - (x[i] -  (mu[j]+rho[i]*(x[i+1]-mu[j]))^2/(2*sigma^2))
   }
-  if(same_rho)
-    app.dens[[1]] <- dens(x[2], x[1], mu[2], mu[1], rho)    
-  else
-    app.dens[[1]] <- dens(x[2], x[1], mu[2], mu[1], rho[2])
-  probs <- vector('list', length(sop))
-  for(i in 1:length(sop)){
-    probs[[i]] <- do.call(app.dens[[i]], list(sop[[i]]))
+  
+  probs <- matrix(nrow = length(wj), ncol = n)
+  for(i in 1:ncol(probs)){
+    probs[,i] <- vapply(1:length(wj), dens, 0, i = i+1)
   }
-  probs <- lapply(probs, function(x) x/sum(x))
-
-  probs <- lapply(probs, asNumeric)
-  d.sample <- function(pr) sample(1:length(pr), 1, prob = pr)
-  new.d <- lapply(probs, function(x) sample(1:length(x), 1, prob = x))
-  new.d <- unlist(new.d)
-  return(new.d)
+  browser()
+  probs <- apply(probs, 2, function(x){
+    sorted <- sort(x, index.return = T)
+    indices <- sorted$ix
+    sorted <- sorted$x
+    sorted <- sorted - sorted[n]
+    sorted <- ifelse(sorted >= log(error) - log(n), exp(sorted), 0)
+    norms <- sorted/sum(sorted)
+    norms[indices]
+  })
+  apply(probs, 2, function(x) sample(1:length(wj), 1, prob = x))
 }
 
 
 #### z_li
 
 z_li <- function(x, old_z, wj, phi, mu, sigma, ki, di, J2){
-  runifo <- Vectorize(runif, 'max')
-  vj <- lapply(old_z, function(x) runifo(1, min = 0, max = exp(-phi*x) ) )
-  Js <- lapply(vj, function(x) sapply(x, function(y) floor( -(1/phi)*log(y) ) ) )
-  sop <- lapply(Js, function(x) lapply(x, function(y) return(1:y))  )
-  dens <- function(y, mu){ function(j){exp(phi*j)*wj[j]*(1-exp(-(y-mu)^2/(2*sigma))) }}
-  app.dens <- vector('list', length(x)-1)
-  for(i in 2:(length(x) - 1)){
-    app.dens[[i]] <- dens(x[i], mu[di[i]]) 
+ 
+  dens <- function(i, j){ 
+    if(exp(-(x[i]-mu[j])^2/(2*sigma)) == 0)
+      wj[j]*(1-exp(-(x[i]-mu[j])^2/(2*mpfr(sigma,100)))) 
+    else
+      wj[j]*(1-exp(-(x[i]-mu[j])^2/(2*sigma))) 
   }
-  app.dens[[1]] <- dens(x[1], mu[1])#Ni idea por qué pero sólo así jala
-  probs <- vector('list', length(sop))
-  for(i in 1:length(sop)){
-    probs[[i]] <- lapply(sop[[i]], function(x) sapply(x, app.dens[[i]]) )
-  }
-  probs <- lapply(probs, function(x) lapply(x, function(y) y/sum(y)) )
 
-  z.sample <- function(pr) sample(1:length(pr), 1, prob = pr)
-  new.z <- lapply(probs, function(x) lapply(x, z.sample) )
-  new.z <- lapply(new.z, unlist)
-  J1 <- max(unlist(new.z, recursive = T), unlist(di))
-  J <- max(J1, J2)
-  eval(parse(text=paste('w[[i]] <-', 'c(', paste(wj[1:J], collapse=', '), ')')), envir=parent.frame())
-  return(new.z)
+  probs <- vector('list', length(x)-1)
+  for(i in 1:length(probs)){
+    probs[[i]] <- lapply(1:length(wj), dens, i = i) 
+  }
+  probs <- lapply(probs, function(.) lapply(., function(x) x/Reduce('+',.)))
+  suppressWarnings(probs <- lapply(probs, function(.) sapply(., function(x) ifelse(is(x,'mpfr'), asNumeric(x), x))))
+  probs <- do.call(cbind, probs) 
+  lapply(1:ncol(probs), function(i) sample(1:length(wj), ki[i], T, probs[,i]))
 }
 
 
@@ -165,17 +155,17 @@ mu_j <- function(j, x, old_mu, rho, d_i, z_il, t, m, sigma, same_rho, wj){
   if(prueba == 0){
     prueba <- prod(mpfrArray(num.prob, 100))
   }
-
+#estas bien wey solo haz lo mismo que arriba 
   mh.step <- function(j){
     t.j <- t_j(j)
-    mu.prop <- rnorm(1, m_j(j, t.j), 1/t.j)
+    mu.prop <- rnorm(1, m_j(j, t.j), sqrt(1/t.j))
     indices <- unlist(lapply(z_il, function(x) length(which(x == j)) ))
     if( identical( which(indices > 0), integer(0) ))
       denom.uno <- 1
     else{
-      denom.uno <-  (1 - exp( (x[which(indices > 0) ] - mu.prop)^2 / (2*sigma) ))^indices[which(indices > 0)] 
+      denom.uno <-  (1 - exp( (x[which(indices > 0) + 1] - mu.prop)^2 / (2*sigma) ))^indices[which(indices > 0)] 
       if(prod(denom.uno) == 0 || is.nan(prod(denom.uno)))
-        denom.uno <-  (1 - exp( (x[which(indices > 0) ] - mpfr(mu.prop, 100))^2 / (2*sigma) ))^indices[which(indices > 0)] 
+        denom.uno <-  (1 - exp( (x[which(indices > 0) +1] - mpfr(mu.prop, 100))^2 / (2*sigma) ))^indices[which(indices > 0)] 
       denom.uno <- prod(denom.uno)  
     }
     
@@ -184,9 +174,9 @@ mu_j <- function(j, x, old_mu, rho, d_i, z_il, t, m, sigma, same_rho, wj){
     if( identical( indices.dos, integer(0) ) )
       denom.dos <- 1
     else{
-      denom.dos <- (1 - exp( (x[which(indices.dos > 0)] - mu.prop)^2 / (2*sigma) ))^indices[which(indices.dos > 0)] 
+      denom.dos <- (1 - exp( (x[which(indices.dos > 0)+1] - mu.prop)^2 / (2*sigma) ))^indices[which(indices.dos > 0)] 
       if(prod(denom.dos) == 0 || is.nan(prod(denom.dos)))
-        denom.dos <- (1 - exp( (x[which(indices.dos > 0)] - mpfr(mu.prop, 100))^2 / (2*sigma) ))^indices[which(indices.dos > 0)] 
+        denom.dos <- (1 - exp( (x[which(indices.dos > 0)+1] - mpfr(mu.prop, 100))^2 / (2*sigma) ))^indices[which(indices.dos > 0)] 
       denom.dos <- prod(denom.dos)      
     }
 
@@ -308,7 +298,7 @@ rtruncgamma <- function(shape, rate, prev.tau, trunc){
 # }
 
 #ademas de tau o sigma
-mcmc <- function(datos, nsim, ksi, phi, R, same_rho, b, c, a, p, t, m, epsilon, init){
+mcmc <- function(datos, nsim, ksi, phi, R, same_rho, b, c, a, p, t, m, epsilon, init, error){
   suppressPackageStartupMessages(require(Rmpfr))
   w <- vector('list', nsim); w[[1]] <- init[['w']]
   d <- init[['d']]
@@ -321,16 +311,16 @@ mcmc <- function(datos, nsim, ksi, phi, R, same_rho, b, c, a, p, t, m, epsilon, 
  # pb <- txtProgressBar(min = 0, max = nsim, style = 3)
     #list(R, mu, dj, z_il, sigma)
   for(i in 2:nsim){
+    print(i)
   #checar si el razonamiento es correcto
    # if(i %% 100 == 0)
     #  setTxtProgressBar(pb, i)
-    print(i)
-    d <- d_i(x = datos, old_d = d, 
-            wj = w[[i-1]], ksi=ksi, mu = mu[[i-1]],
-            sigma = sigma[[i-1]], rho = rho[[i-1]], same_rho = same_rho, i=i)
-    z <- z_li(x = datos, old_z = z, wj = w[[i-1]], 
-               phi=phi, mu = mu[[i-1]], sigma = sigma[[i-1]], ki = k[[i]], di = d, J2 = J2)
     w[[i]] <- wj(z, d, b, epsilon)
+    d <- d_i(x = datos, old_d = d, 
+            wj = w[[i]], ksi=ksi, mu = mu[[i-1]],
+            sigma = sigma[[i-1]], rho = rho[[i-1]], same_rho = same_rho, i=i, error=error)
+    z <- z_li(x = datos, old_z = z, wj = w[[i]], 
+               phi=phi, mu = mu[[i-1]], sigma = sigma[[i-1]], ki = k[[i-1]], di = d, J2 = J2)
     rho[[i]] <- rho_j(x = datos, old_rho = rho[[i-1]], R,
                 d_i = d, mu = mu[[i-1]],
                 sigma = sigma[[i-1]], w_j = w[[i]], same_rho = same_rho)
@@ -338,8 +328,8 @@ mcmc <- function(datos, nsim, ksi, phi, R, same_rho, b, c, a, p, t, m, epsilon, 
               rho = rho[[i]], d_i = d, m = m, wj = w[[i]],
               z_il = z, t, sigma = sigma[[i-1]], same_rho=same_rho)
     sigma[[i]] <- tau(x = datos, mu = mu[[i]], d_i = d,
-              old_tau = 1/sigma[[i-1]], rho = rho[[i]],
-              c, a, z_il = z, same_rho = same_rho)
+          c, a, z_il = z, same_rho = same_rho,
+old_tau = 1/sigma[[i-1]], rho = rho[[i]])
     k[[i]] = k_i(old_k = k[[i-1]], x = datos,
             wj = w[[i]], p, z_il = z, mu = mu[[i]], sigma = sigma[[i]])
   }
@@ -355,18 +345,38 @@ post.inf <- function(mcmc, burn_in){
   return(list(w.hat, m.hat, sigma.hat, rho.hat))
 }
 
-paraZ <- sample(1:5, length(x_n) - 1, TRUE)
-w <- rbeta(800,1,1)
-init <- list(d = sample(1:4, length(x_n)-1, T),
+paraZ <- sample(1:5, length(x_m) - 1, TRUE)
+w <- rbeta(1000,1,1)
+init <- list(d = sample(1:4, length(x_m)-1, T),
              z = lapply(paraZ, function(n) sample(1:n, n) ),
              w = w/sum(w),
              k = paraZ,
-             rho = 0.5,
-             sigma = 5,
+             rho = rep(0.5,1000),
+             sigma = 1,
              mu = sample(c(-1,0.5,4), 30, replace = T))  #ver si estas madres son convexas
 #nota: checar x_0
-itera <- mcmc(x_n, 5000, ksi = 0.5, phi = 0.5,
-              R = seq(0.001, 0.999, by = 0.001), same_rho = T,
-              a = 1, c = 0.1, p = 0.5, m = mean(x_n), b = 0.1,
-              t = 1/sd(x_n), epsilon = 0.00000001, init = init)
+itera <- mcmc(x_n, 1, ksi = 2, phi = 2,
+              R = seq(0.001, 0.999, by = 0.01), same_rho = F,
+              a = 1, c = 0.1, p = 0.5, m = mean(x_m), b = 0.1,
+              t = 1/sd(x_n), epsilon = 0.00000001, init = init, error=0.000000001) 
+
+
+
+# rmodelo <- function(x, rho, sigma, mus, trunc, wj){
+#   pesos <- wj[1:trunc]*dnorm(mpfr(sim_x[1], 100), mus[1:trunc], sqrt(sigma))
+#   pesos <- asNumeric(pesos/sum(pesos))
+#   cual <- sample(1:trunc, 1, prob = pesos)
+#   rnorm(1, mus[cual] + rho*(x - mus[cual]), sqrt((1-rho^2)*sigma))
+# }
+# 
+# sim_x <- x_m
+# for(i in 2:length(sim_x)){
+#   if(i %% 100 == 0){
+#     print(i)
+#   }
+#   sim_x[i] <- rmodelo(sim_x[i-1], sigma = mean(itera[[4]][1000:5000]),
+#                       rho = mean(itera[[2]][1000:5000]), mus = mus, wj = wj, trunc = 20 )
+# }
+
+
 
